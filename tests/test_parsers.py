@@ -11,6 +11,9 @@ try:
     testpath = os.path.dirname(os.path.abspath(__file__))
 except NameError:
     testpath = os.getcwd()  # easy run in interpreter
+    if "tests" not in testpath:
+        testpath = os.path.join(testpath, "tests")
+
 
 sys.path.append(os.path.join(testpath, ".."))
 
@@ -33,6 +36,7 @@ def test_parse_exio1(fix_testmrio_calc):
     test_mrio = fix_testmrio_calc.testmrio
 
     exio1 = pymrio.parse_exiobase1(exio1_mockpath)
+
     exio1.calc_all()
 
     assert test_mrio.emissions.S.iloc[1, 1] == pytest.approx(

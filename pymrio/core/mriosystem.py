@@ -13,6 +13,7 @@ import logging
 import re
 import string
 import time
+import typing
 import warnings
 from pathlib import Path
 
@@ -22,14 +23,23 @@ import numpy as np
 import pandas as pd
 
 import pymrio.tools.ioutil as ioutil
-from pymrio.core.constants import DEFAULT_FILE_NAMES, GENERIC_NAMES, MISSING_AGG_ENTRY
+from pymrio.core.constants import (
+    DEFAULT_FILE_NAMES,
+    GENERIC_NAMES,
+    MISSING_AGG_ENTRY,
+    STORAGE_FORMAT,
+)
 from pymrio.tools.iomath import (
     calc_A,
     calc_accounts,
+    calc_As,
     calc_F,
     calc_F_Y,
+    calc_G,
+    calc_gross_trade,
     calc_L,
     calc_M,
+    calc_M_down,
     calc_S,
     calc_S_Y,
     calc_x,
@@ -47,25 +57,25 @@ def _warn_deprecation(message):  # pragma: no cover
 
 # Exceptions
 class ResetError(Exception):
-    """ Base class for errors while reseting the system"""
+    """Base class for errors while reseting the system"""
 
     pass
 
 
 class AggregationError(Exception):
-    """ Base class for errors while reseting the system"""
+    """Base class for errors while reseting the system"""
 
     pass
 
 
 class ResetWarning(UserWarning):
-    """ Base class for errors while reseting the system"""
+    """Base class for errors while reseting the system"""
 
     pass
 
 
 # Abstract classes
-class CoreSystem:
+class BaseSystem:
     """This class is the base class for IOSystem and Extension
 
     Note
@@ -85,7 +95,7 @@ class CoreSystem:
         return startstr + parastr
 
     def __eq__(self, other):
-        """ Only the dataframes are compared. """
+        """Only the dataframes are compared."""
         for key, item in self.__dict__.items():
             if type(item) is pd.DataFrame:
                 if key not in other.__dict__:
@@ -116,6 +126,9 @@ class CoreSystem:
         # Attriubtes to keep must be defined in the init: __basic__
         strwarn = None
         for df in self.__basic__:
+            if df == "F_Y":
+                # F_Y is optional and can be None
+                continue
             if (getattr(self, df)) is None:
                 if force:
                     strwarn = (
@@ -168,6 +181,9 @@ class CoreSystem:
         # defined in self.__non_agg_attributes__
         strwarn = None
         for df in self.__basic__:
+            if df == "F_Y":
+                # F_Y is optional and can be None
+                continue
             if (getattr(self, df)) is None:
                 if force:
                     strwarn = (
@@ -508,9 +524,7 @@ class CoreSystem:
                 else:
                     yield key
 
-    def save(
-        self, path, table_format="txt", sep="\t", table_ext=None, float_format="%.12g"
-    ):
+    def save(self, path, table_format="txt", sep="\t", float_format="%.12g"):
         """Saving the system to path
 
 
@@ -524,45 +538,39 @@ class CoreSystem:
             Format to save the DataFrames:
 
                 - 'pkl' : Binary pickle files,
-                          alias: 'pickle', 'bin', 'binary'
-                - 'txt' : Text files (default), alias: 'text', 'csv'
+                          alias: 'pickle'
+                - 'parquet': Parquet format
+                          alias: 'par'
+                - 'txt' : Text files (default), alias: 'text', 'csv', 'tsv'
 
-        table_ext : string, optional
-            File extension,
-            default depends on table_format(.pkl for pickle, .txt for text)
 
         sep : string, optional
             Field delimiter for the output file, only for txt files.
             Default: tab ('\t')
 
         float_format : string, optional
-            Format for saving the DataFrames,
-            default = '%.12g', only for txt files
+            Format for saving the DataFrames, only for txt files.
+            default = '%.12g'
         """
 
-        path = Path(path)
+        for format_key, format_extension in STORAGE_FORMAT.items():
+            if table_format.lower() in format_extension:
+                table_extension = table_format
+                table_format = format_key
+                break
+        else:
+            raise ValueError(
+                'Unknown table format "{}" - '
+                'must be "txt", "pkl", "parquet" or an alias as '
+                "defined in STORAGE_FORMAT".format(table_format)
+            )
 
+        path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
 
         para_file_path = path / DEFAULT_FILE_NAMES["filepara"]
         file_para = dict()
         file_para["files"] = dict()
-
-        if table_format in ["text", "csv", "txt"]:
-            table_format = "txt"
-        elif table_format in ["pickle", "bin", "binary", "pkl"]:
-            table_format = "pkl"
-        else:
-            raise ValueError(
-                'Unknown table format "{}" - '
-                'must be "txt" or "pkl"'.format(table_format)
-            )
-
-        if not table_ext:
-            if table_format == "txt":
-                table_ext = ".txt"
-            if table_format == "pkl":
-                table_ext = ".pkl"
 
         if str(type(self)) == "<class 'pymrio.core.mriosystem.IOSystem'>":
             file_para["systemtype"] = GENERIC_NAMES["iosys"]
@@ -586,13 +594,17 @@ class CoreSystem:
             else:
                 nr_header = 1
 
-            save_file = df_name + table_ext
+            save_file = df_name + "." + table_extension
             save_file_with_path = path / save_file
             logging.info("Save file {}".format(save_file_with_path))
             if table_format == "txt":
                 df.to_csv(save_file_with_path, sep=sep, float_format=float_format)
-            else:
+            elif table_format == "pickle":
                 df.to_pickle(save_file_with_path)
+            elif table_format == "parquet":
+                df.to_parquet(save_file_with_path)
+            else:
+                raise ValueError("Unknow table format passed through")
 
             file_para["files"][df_name] = dict()
             file_para["files"][df_name]["name"] = save_file
@@ -701,7 +713,7 @@ class CoreSystem:
 
 
 # API classes
-class Extension(CoreSystem):
+class Extension(BaseSystem):
     """Class which gathers all information for one extension of the IOSystem
 
     Notes
@@ -729,6 +741,8 @@ class Extension(CoreSystem):
         Direct impact (extensions) coefficients of final demand. Index as F_Y
     M : pandas.DataFrame
         Multipliers with multiindex as F
+    M_down : pandas.DataFrame
+        Downstream multipliers with multiindex as F
     D_cba : pandas.DataFrame
         Footprint of consumption,  further specification with
         _reg (per region) or _cap (per capita) possible
@@ -767,6 +781,7 @@ class Extension(CoreSystem):
         S=None,
         S_Y=None,
         M=None,
+        M_down=None,
         D_cba=None,
         D_pba=None,
         D_imp=None,
@@ -774,13 +789,14 @@ class Extension(CoreSystem):
         unit=None,
         **kwargs,
     ):
-        """ Init function - see docstring class """
+        """Init function - see docstring class"""
         self.name = name
         self.F = F
         self.F_Y = F_Y
         self.S = S
         self.S_Y = S_Y
         self.M = M
+        self.M_down = M_down
         self.D_cba = D_cba
         self.D_pba = D_pba
         self.D_imp = D_imp
@@ -792,9 +808,9 @@ class Extension(CoreSystem):
 
         # Internal attributes
 
-        # minimal necessary to calc the rest excluding F_Y since this might be
-        # not necessarily present
-        self.__basic__ = ["F"]
+        # minimal necessary to calc the rest
+        # F_Y is optional, but this is checked in the reset routines
+        self.__basic__ = ["F", "F_Y"]
         self.__D_accounts__ = [
             "D_cba",
             "D_pba",
@@ -833,7 +849,7 @@ class Extension(CoreSystem):
     def __str__(self):
         return super().__str__("Extension {} with parameters: ").format(self.name)
 
-    def calc_system(self, x, Y, Y_agg=None, L=None, population=None):
+    def calc_system(self, x, Y, Y_agg=None, L=None, G=None, population=None):
         """Calculates the missing part of the extension plus accounts
 
         This method allows to specify an aggregated Y_agg for the
@@ -843,7 +859,7 @@ class Extension(CoreSystem):
         Calculates:
 
         - for each sector and country:
-            S, S_Y (if F_Y available), M, D_cba, D_pba_sector, D_imp_sector,
+            S, S_Y (if F_Y available), M, M_down, D_cba, D_pba_sector, D_imp_sector,
             D_exp_sector
         - for each region:
             D_cba_reg, D_pba_reg, D_imp_reg, D_exp_reg,
@@ -869,21 +885,22 @@ class Extension(CoreSystem):
             Leontief input output table L. If this is not given,
             the method recalculates M based on D_cba (must be present in
             the extension).
+        G : pandas.DataFrame or numpy.array, optional
+            Ghosh input output table G. If this is not given,
+            M_down is not calculated.
         population : pandas.DataFrame or np.array, optional
             Row vector with population per region
         """
 
+        # TODO: This should only be used for calculating the full system.
+        # TODO There needs to be a new method for calculating the system for a different demand vector
+
         if Y_agg is None:
             try:
-                Y_agg = Y.sum(level="region", axis=1).reindex(
-                    self.get_regions(), axis=1
-                )
+                Y_agg = Y.groupby(level="region", axis=1, sort=False).sum()
 
             except (AssertionError, KeyError):
-                Y_agg = Y.sum(
-                    level=0,
-                    axis=1,
-                ).reindex(self.get_regions(), axis=1)
+                Y_agg = Y.groupby(level=0, axis=1, sort=False).sum()
 
         y_vec = Y.sum(axis=0)
 
@@ -920,18 +937,25 @@ class Extension(CoreSystem):
                         "Recalculation of M not possible - cause: {}".format(ex)
                     )
 
+        if self.M_down is None:
+            if G is not None:
+                self.M_down = calc_M_down(self.S, G)
+                logging.debug("{} - M_down calculated based on G".format(self.name))
+            else:
+                logging.debug(
+                    "Calculation of M_down not possible because G is not available.".format(
+                        self.name
+                    )
+                )
+
         F_Y_agg = 0
         if self.F_Y is not None:
             # F_Y_agg = ioutil.agg_columns(
             # ext['F_Y'], self.get_Y_categories().size)
             try:
-                F_Y_agg = self.F_Y.sum(level="region", axis=1).reindex(
-                    self.get_regions(), axis=1
-                )
+                F_Y_agg = self.F_Y.groupby(level="region", axis=1, sort=False).sum()
             except (AssertionError, KeyError):
-                F_Y_agg = self.F_Y.sum(level=0, axis=1).reindex(
-                    self.get_regions(), axis=1
-                )
+                F_Y_agg = self.F_Y.groupby(level=0, axis=1, sort=False).sum()
 
         if (
             (self.D_cba is None)
@@ -944,7 +968,7 @@ class Extension(CoreSystem):
                 return
             else:
                 self.D_cba, self.D_pba, self.D_imp, self.D_exp = calc_accounts(
-                    self.S, L, Y_agg, self.get_sectors().size
+                    self.S, L, Y_agg
                 )
                 logging.debug("{} - Accounts D calculated".format(self.name))
 
@@ -957,72 +981,57 @@ class Extension(CoreSystem):
         ):
             try:
                 self.D_cba_reg = (
-                    self.D_cba.sum(level="region", axis=1).reindex(
-                        self.get_regions(), axis=1
-                    )
+                    self.D_cba.groupby(level="region", axis=1, sort=False).sum()
                     + F_Y_agg
                 )
             except (AssertionError, KeyError):
                 self.D_cba_reg = (
-                    self.D_cba.sum(level=0, axis=1).reindex(self.get_regions(), axis=1)
-                    + F_Y_agg
+                    self.D_cba.groupby(level=0, axis=1, sort=False).sum() + F_Y_agg
                 )
             try:
                 self.D_pba_reg = (
-                    self.D_pba.sum(level="region", axis=1).reindex(
-                        self.get_regions(), axis=1
-                    )
+                    self.D_pba.groupby(level="region", axis=1, sort=False).sum()
                     + F_Y_agg
                 )
             except (AssertionError, KeyError):
                 self.D_pba_reg = (
-                    self.D_pba.sum(level=0, axis=1).reindex(self.get_regions(), axis=1)
-                    + F_Y_agg
+                    self.D_pba.groupby(level=0, axis=1, sort=False).sum() + F_Y_agg
                 )
             try:
-                self.D_imp_reg = self.D_imp.sum(level="region", axis=1).reindex(
-                    self.get_regions(), axis=1
-                )
+                self.D_imp_reg = self.D_imp.groupby(
+                    level="region", axis=1, sort=False
+                ).sum()
             except (AssertionError, KeyError):
-                self.D_imp_reg = self.D_imp.sum(level=0, axis=1).reindex(
-                    self.get_regions(), axis=1
-                )
+                self.D_imp_reg = self.D_imp.groupby(level=0, axis=1, sort=False).sum()
             try:
-                self.D_exp_reg = self.D_exp.sum(level="region", axis=1).reindex(
-                    self.get_regions(), axis=1
-                )
+                self.D_exp_reg = self.D_exp.groupby(
+                    level="region", axis=1, sort=False
+                ).sum()
             except (AssertionError, KeyError):
-                self.D_exp_reg = self.D_exp.sum(level=0, axis=1).reindex(
-                    self.get_regions(), axis=1
-                )
+                self.D_exp_reg = self.D_exp.groupby(level=0, axis=1, sort=False).sum()
 
             logging.debug("{} - Accounts D for regions calculated".format(self.name))
 
         # calc accounts per capita if population data is available
         if population is not None:
-            if type(population) is pd.DataFrame:
-                # check for right order:
-                if population.columns.tolist() != self.D_cba_reg.columns.tolist():
-                    logging.warning(
-                        "Population regions are inconsistent with IO regions"
-                    )
-                population = population.values
-
             if (
                 (self.D_cba_cap is None)
                 or (self.D_pba_cap is None)
                 or (self.D_imp_cap is None)
                 or (self.D_exp_cap is None)
             ):
-                self.D_cba_cap = self.D_cba_reg.dot(np.diagflat(1.0 / population))
-                self.D_pba_cap = self.D_pba_reg.dot(np.diagflat(1.0 / population))
-                self.D_imp_cap = self.D_imp_reg.dot(np.diagflat(1.0 / population))
-                self.D_exp_cap = self.D_exp_reg.dot(np.diagflat(1.0 / population))
-
-                self.D_cba_cap.columns = self.D_cba_reg.columns
-                self.D_pba_cap.columns = self.D_pba_reg.columns
-                self.D_imp_cap.columns = self.D_imp_reg.columns
-                self.D_exp_cap.columns = self.D_exp_reg.columns
+                self.D_cba_cap = (
+                    self.D_cba_reg / population.iloc[0][self.D_cba_reg.columns]
+                )
+                self.D_pba_cap = (
+                    self.D_pba_reg / population.iloc[0][self.D_pba_reg.columns]
+                )
+                self.D_imp_cap = (
+                    self.D_imp_reg / population.iloc[0][self.D_imp_reg.columns]
+                )
+                self.D_exp_cap = (
+                    self.D_exp_reg / population.iloc[0][self.D_exp_reg.columns]
+                )
 
                 logging.debug("{} - Accounts D per capita calculated".format(self.name))
         return self
@@ -1388,7 +1397,7 @@ class Extension(CoreSystem):
             plt.ion()
 
     def get_rows(self):
-        """ Returns the name of the rows of the extension """
+        """Returns the name of the rows of the extension"""
         possible_dataframes = [
             "F",
             "F_Y",
@@ -1602,7 +1611,7 @@ class Extension(CoreSystem):
                 factors_cleaned_gathered.append(fac_rest)
 
         for imissi in impacts_stressors_missing:
-            logging.warn(
+            logging.warning(
                 f"Impact >{imissi}< removed - calculation requires stressors "
                 f"not present in extension >{self.name}<"
             )
@@ -1648,7 +1657,7 @@ class Extension(CoreSystem):
             return ex
 
 
-class IOSystem(CoreSystem):
+class IOSystem(BaseSystem):
     """Class containing a whole EE MRIO System
 
     The class collects pandas dataframes for a whole EE MRIO system. The
@@ -1695,6 +1704,8 @@ class IOSystem(CoreSystem):
     name : string, optional, DEPRECATED
         Name of the IOSystem, default is 'IO'
         Will be removed in future versions - all data in meta
+    population: pandas.DataFrame, optional
+        DataFrame with row 'Population' and columns following region names of Z
 
     **kwargs : dictonary
         Extensions are given as dictionaries and will be passed to the
@@ -1709,8 +1720,10 @@ class IOSystem(CoreSystem):
         Z=None,
         Y=None,
         A=None,
+        As=None,
         x=None,
         L=None,
+        G=None,
         unit=None,
         population=None,
         system=None,
@@ -1722,12 +1735,14 @@ class IOSystem(CoreSystem):
         description=None,
         **kwargs,
     ):
-        """ Init function - see docstring class """
+        """Init function - see docstring class"""
         self.Z = Z
         self.Y = Y
         self.x = x
         self.A = A
+        self.As = As
         self.L = L
+        self.G = G
         self.unit = unit
         self.population = population
 
@@ -1760,7 +1775,7 @@ class IOSystem(CoreSystem):
         return super().__str__("IO System with parameters: ")
 
     def __eq__(self, other):
-        """ Only the dataframes are compared. """
+        """Only the dataframes are compared."""
         self_ext = set(self.get_extensions(data=False))
         other_ext = set(other.get_extensions(data=False))
         if len(self_ext.difference(other_ext)) < 0:
@@ -1779,11 +1794,33 @@ class IOSystem(CoreSystem):
         except AttributeError:
             return "undef"
 
+    def get_gross_trade(
+        self,
+    ) -> typing.NamedTuple(
+        "gross_trade", [("bilat_flows", pd.DataFrame), ("totals", pd.DataFrame)]
+    ):
+        """Returns the gross bilateral trade flows and totals
+
+        These are the entries of Z and Y with the domestic blocks set to 0.
+
+        Returns
+        -------
+        namedtuple (with two pandas DataFrames)
+            A namedTuple with two fields:
+
+                - bilat_flows: df with rows: exporting country and
+                  sector, columns: importing countries
+                - totals: df with gross total imports and exports per
+                  sector and region
+
+        """
+        return calc_gross_trade(Z=self.Z, Y=self.Y)
+
     def calc_all(self):
         """
         Calculates missing parts of the IOSystem and all extensions.
 
-        This method call calc_system and calc_extensions
+        This method calls calc_system and calc_extensions
 
         """
         self.calc_system()
@@ -1830,9 +1867,17 @@ class IOSystem(CoreSystem):
             self.A = calc_A(self.Z, self.x)
             self.meta._add_modify("Coefficient matrix A calculated")
 
+        if self.As is None:
+            self.As = calc_As(self.Z, self.x)
+            self.meta._add_modify("Coefficient matrix As calculated")
+
         if self.L is None:
             self.L = calc_L(self.A)
             self.meta._add_modify("Leontief matrix L calculated")
+
+        if self.G is None:
+            self.G = calc_G(self.As)
+            self.meta._add_modify("Ghosh matrix G calculated")
 
         return self
 
@@ -1865,7 +1910,12 @@ class IOSystem(CoreSystem):
             )
             ext = getattr(self, ext_name)
             ext.calc_system(
-                x=self.x, Y=self.Y, L=self.L, Y_agg=Y_agg, population=self.population
+                x=self.x,
+                Y=self.Y,
+                L=self.L,
+                G=self.G,
+                Y_agg=Y_agg,
+                population=self.population,
             )
         return self
 
@@ -1980,6 +2030,25 @@ class IOSystem(CoreSystem):
         self.meta._add_modify("Reset all calculated data")
         return self
 
+    def reset_extensions(self, force=False):
+        """Resets all extensions - preparation for recalculation with a new Y
+
+        This calls reset_full for all extension.
+        If only a specific extension should be recalulated call reset_full on the
+        extension directly.
+
+        Parameters
+        ----------
+
+        force: boolean, optional
+            If True, reset to flows although the system can not be
+            recalculated. Default: False
+
+        """
+        [ee.reset_full(force=force) for ee in self.get_extensions(data=True)]
+        self.meta._add_modify("Reset all extenions data")
+        return self
+
     def reset_to_flows(self, force=False):
         """Keeps only the absolute values.
 
@@ -2034,9 +2103,7 @@ class IOSystem(CoreSystem):
         self.meta._add_modify("Reset full system to coefficients")
         return self
 
-    def save_all(
-        self, path, table_format="txt", sep="\t", table_ext=None, float_format="%.12g"
-    ):
+    def save_all(self, path, table_format="txt", sep="\t", float_format="%.12g"):
         """Saves the system and all extensions
 
         Extensions are saved in separate folders (names based on extension)
@@ -2053,7 +2120,6 @@ class IOSystem(CoreSystem):
             path=path,
             table_format=table_format,
             sep=sep,
-            table_ext=table_ext,
             float_format=float_format,
         )
 
@@ -2064,10 +2130,78 @@ class IOSystem(CoreSystem):
                 path=ext_path,
                 table_format=table_format,
                 sep=sep,
-                table_ext=table_ext,
                 float_format=float_format,
             )
         return self
+
+    def aggregate_duplicates(self, inplace=True):
+        """Aggregate duplicated regions and sectors
+
+        Alternative approach to aggregate MRIO by renaming sectors/regions
+        in place and then adding them together. This works well if used with the included classification schemes.
+
+        Parameters
+        ----------
+        inplace : boolean, optional
+            If True, aggregates the IOSystem in place (default),
+            otherwise aggregation happens on a copy of the IOSystem.
+            Regardless of the setting, the IOSystem is returned to
+            allow for chained operations.
+
+        Returns
+        -------
+        IOSystem
+            Aggregated IOSystem (if inplace is False)
+
+        """
+
+        if not inplace:
+            self = self.copy()
+
+        try:
+            self.reset_all_to_flows()
+        except ResetError:
+            raise AggregationError(
+                "System under-defined for aggregation - "
+                "do a 'calc_all' before aggregation"
+            )
+
+        def agg_routine(df):
+            """Aggregation of duplicate columns and rows"""
+            _index_names = df.index.names
+            _columns_names = df.columns.names
+            if (type(df.columns[0]) is not tuple) and df.columns[0].lower() == "unit":
+                df = df.groupby(df.index, axis=0, sort=False).first()
+            else:
+                df = (
+                    df.groupby(df.index, axis=0, sort=False)
+                    .sum()
+                    .groupby(df.columns, axis=1, sort=False)
+                    .sum()
+                )
+
+            if type(df.index[0]) is tuple:
+                df.index = pd.MultiIndex.from_tuples(df.index, names=_index_names)
+            if type(df.columns[0]) is tuple:
+                df.columns = pd.MultiIndex.from_tuples(df.columns, names=_columns_names)
+            return df
+
+        for df_to_agg_name in self.get_DataFrame(data=False, with_unit=True):
+            self.meta._add_modify(f"Aggregate economic core - {df_to_agg_name}")
+            setattr(self, df_to_agg_name, agg_routine(df=getattr(self, df_to_agg_name)))
+
+        # Aggregate extension
+        for ext in self.get_extensions(data=True):
+            for df_to_agg_name in ext.get_DataFrame(data=False, with_unit=False):
+                self.meta._add_modify(
+                    f"Aggregate extension {ext.name} - {df_to_agg_name}"
+                )
+                setattr(
+                    ext, df_to_agg_name, agg_routine(df=getattr(ext, df_to_agg_name))
+                )
+
+        if not inplace:
+            return self
 
     def aggregate(
         self,
@@ -2097,7 +2231,7 @@ class IOSystem(CoreSystem):
             The aggregation vector or matrix for the regions (np.ndarray or
             list). If string: aggregates to one total region and names is
             to the given string.
-            Pandas Dataframe with columns 'orignal' and 'aggregated'.
+            Pandas DataFrame with columns 'original' and 'aggregated'.
             This is the output from the country_converter.agg_conc
         sector_agg : list, arrays or string, optional
             The aggregation vector or matrix for the sectors (np.ndarray or
@@ -2127,9 +2261,12 @@ class IOSystem(CoreSystem):
             Aggregated IOSystem (if inplace is False)
 
         """
-        # Development note: This can not be put in the CoreSystem b/c
+        # Development note: This can not be put in the BaseSystem b/c
         # than the recalculation of the extension coefficients would not
         # work.
+
+        if len(self.unit.squeeze().unique()) > 1:
+            raise NotImplementedError("Aggregation not implemented for hybrid tables")
 
         if not inplace:
             self = self.copy()
@@ -2302,6 +2439,18 @@ class IOSystem(CoreSystem):
                 index=self.population.index,
             )
 
+        # NOTE: this fails for none consistent units (hybrid tables)
+        try:
+            _value = self.unit.iloc[0].tolist()[0]
+            self.unit = pd.DataFrame(
+                index=self.Z.index,
+                columns=self.unit.columns,
+                data=_value,
+            )
+        except AttributeError:
+            # could fail if no unit available
+            self.unit = None
+
         for extension in self.get_extensions(data=True):
             self.meta._add_modify("Aggregate extensions...")
             extension.reset_to_flows()
@@ -2310,7 +2459,6 @@ class IOSystem(CoreSystem):
                 extension.get_DataFrame(data=False, with_unit=False),
                 extension.get_DataFrame(data=True, with_unit=False),
             ):
-
                 # Without unit - this is reset aftwards if necessary
                 if ik_df.index.names == ["region", "sector"] == ik_df.columns.names:
                     # Full disaggregated extensions - aggregate both axis
@@ -2324,15 +2472,10 @@ class IOSystem(CoreSystem):
                     extension.__dict__[ik_name].columns = mi_reg_sec
                     extension.__dict__[ik_name].index = mi_reg_sec
                     st_redo_unit = True
-                elif (
-                    ik_df.index.names
-                    == [
-                        "region",
-                        "sector",
-                    ]
-                    and ik_df.columns.names == ["region", "category"]
-                ):
-
+                elif ik_df.index.names == [
+                    "region",
+                    "sector",
+                ] and ik_df.columns.names == ["region", "category"]:
                     # Full disaggregated finald demand satellite account.
                     # Thats not implemented yet - but aggregation is in place
                     extension.__dict__[ik_name] = pd.DataFrame(
@@ -2357,6 +2500,7 @@ class IOSystem(CoreSystem):
                     extension.__dict__[ik_name].index = ik_df.index
 
                 if st_redo_unit:
+                    # NOTE: this fails for none consistent units
                     try:
                         _value = extension.unit.iloc[0].tolist()[0]
                         extension.unit = pd.DataFrame(

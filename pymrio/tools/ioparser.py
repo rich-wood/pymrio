@@ -25,13 +25,13 @@ from pymrio.tools.ioutil import get_repo_content, sniff_csv_format
 
 # Exceptions
 class ParserError(Exception):
-    """ Base class for errors concerning parsing of IO source files """
+    """Base class for errors concerning parsing of IO source files"""
 
     pass
 
 
 class ParserWarning(UserWarning):
-    """ Base class for warnings concerning parsing of IO source files """
+    """Base class for warnings concerning parsing of IO source files"""
 
     pass
 
@@ -370,8 +370,10 @@ def generic_exiobase12_parser(exio_files, system=None):
 
         _unit = pd.DataFrame(_unit)
         _unit.columns = ["unit"]
-        _new_unit = _unit.unit.str.replace("/" + mon_unit, "")
-        _new_unit[_new_unit == ""] = _unit.unit[_new_unit == ""].str.replace("/", "")
+        _new_unit = _unit.unit.str.replace("/" + mon_unit, "", regex=True)
+        _new_unit[_new_unit == ""] = _unit.unit[_new_unit == ""].str.replace(
+            "/", "", regex=True
+        )
         _unit.unit = _new_unit
 
         ext_data[tt].reset_index(level="unit", drop=True, inplace=True)
@@ -639,25 +641,31 @@ def parse_exiobase2(path, charact=True, popvector="exio2"):
                 "unit": _unit[Qname],
             }
 
-        impact["S"] = (
-            _impact["Q_factorinputs"]["S"]
-            .append(_impact["Q_emission"]["S"])
-            .append(_impact["Q_materials"]["S"])
-            .append(_impact["Q_resources"]["S"])
+        impact["S"] = pd.concat(
+            [
+                _impact["Q_factorinputs"]["S"],
+                _impact["Q_emission"]["S"],
+                _impact["Q_materials"]["S"],
+                _impact["Q_resources"]["S"],
+            ]
         )
-        impact["F_Y"] = (
-            _impact["Q_factorinputs"]["F_Y"]
-            .append(_impact["Q_emission"]["F_Y"])
-            .append(_impact["Q_materials"]["F_Y"])
-            .append(_impact["Q_resources"]["F_Y"])
+        impact["F_Y"] = pd.concat(
+            [
+                _impact["Q_factorinputs"]["F_Y"],
+                _impact["Q_emission"]["F_Y"],
+                _impact["Q_materials"]["F_Y"],
+                _impact["Q_resources"]["F_Y"],
+            ]
         )
         impact["S"].columns = io.emissions.S.columns
         impact["F_Y"].columns = io.emissions.F_Y.columns
-        impact["unit"] = (
-            _impact["Q_factorinputs"]["unit"]
-            .append(_impact["Q_emission"]["unit"])
-            .append(_impact["Q_materials"]["unit"])
-            .append(_impact["Q_resources"]["unit"])
+        impact["uunit"] = pd.concat(
+            [
+                _impact["Q_factorinputs"]["unit"],
+                _impact["Q_emission"]["unit"],
+                _impact["Q_materials"]["unit"],
+                _impact["Q_resources"]["unit"],
+            ]
         )
         impact["name"] = "impact"
         io.impact = Extension(**impact)
@@ -665,7 +673,7 @@ def parse_exiobase2(path, charact=True, popvector="exio2"):
     if popvector == "exio2":
         logging.debug("Read population vector")
         io.population = pd.read_csv(
-            os.path.join(PYMRIO_PATH["exio20"], "misc", "population.txt"),
+            os.path.join(PYMRIO_PATH["exio2"], "misc", "population.txt"),
             index_col=0,
             sep="\t",
         ).astype(float)
@@ -945,10 +953,10 @@ def parse_wiod(path, year=None, names=("isic", "c_codes"), popvector=None):
     # the environmental extensions names.
     wiot_data.iloc[wiot_header["region"], :] = wiot_data.iloc[
         wiot_header["region"], :
-    ].str.replace("ROM", "ROU")
+    ].str.replace("ROM", "ROU", regex=False)
     wiot_data.iloc[:, wiot_header["region"]] = wiot_data.iloc[
         :, wiot_header["region"]
-    ].str.replace("ROM", "ROU")
+    ].str.replace("ROM", "ROU", regex=False)
 
     # get the end of the interindustry matrix
     _lastZcol = wiot_data[
@@ -1157,7 +1165,7 @@ def parse_wiod(path, year=None, names=("isic", "c_codes"), popvector=None):
             _F_Y.columns = pd.MultiIndex.from_product(
                 [_F_Y.columns, [_ss_F_Y_pressure_column]]
             )
-            _F_Y = _F_Y_template.append(_F_Y)
+            _F_Y = pd.concat([_F_Y_template, _F_Y])
             _F_Y.fillna(0, inplace=True)
             _F_Y.index.names = _dl_ex["F"].index.names
             _F_Y.columns.names = _F_Y_template.columns.names
@@ -1527,7 +1535,7 @@ def parse_oecd(path, year=None):
 
     path = os.path.abspath(os.path.normpath(str(path)))
 
-    oecd_file_starts = ["ICIO2016_", "ICIO2018_"]
+    oecd_file_starts = ["ICIO2016_", "ICIO2018_", "ICIO2021_", "ICIO2023_"]
 
     # determine which oecd file to be parsed
     if not os.path.isdir(path):
@@ -1601,9 +1609,11 @@ def parse_oecd(path, year=None):
     oecd_raw.drop(oecd_totals_row, axis=0, errors="ignore", inplace=True)
 
     # Important - these must not match any country or industry name
-    factor_input = oecd_raw.filter(regex="VALU|TAX", axis=0)
+    factor_input_exact = oecd_raw.filter(items=["TLS", "VA"], axis=0)
+    factor_input_regex = oecd_raw.filter(regex="VALU|TAX", axis=0)
+    factor_input = pd.concat([factor_input_exact, factor_input_regex], axis=0)
     final_demand = oecd_raw.filter(
-        regex="HFCE|NPISH|NPS|GGFC|GFCF|INVNT|INV|DIRP|FD|P33|DISC", axis=1
+        regex="HFCE|NPISH|NPS|GGFC|GFCF|INVNT|INV|DIRP|DPABR|FD|P33|DISC|OUT", axis=1
     )
 
     Z = oecd_raw.loc[
@@ -1616,7 +1626,9 @@ def parse_oecd(path, year=None):
     F_Y_factor_input = factor_input.loc[:, final_demand.columns]
     Y = final_demand.loc[final_demand.index.difference(F_factor_input.index), :]
 
-    Z_index = pd.MultiIndex.from_tuples(tuple(ll) for ll in Z.index.str.split("_"))
+    Z_index = pd.MultiIndex.from_tuples(
+        tuple(ll) for ll in Z.index.map(lambda x: x.split("_", maxsplit=1))
+    )
     Z_columns = Z_index.copy()
     Z_index.names = IDX_NAMES["Z_row"]
     Z_columns.names = IDX_NAMES["Z_col"]
@@ -1660,23 +1672,23 @@ def parse_oecd(path, year=None):
 
         # aggregate rows
         Z.loc[co_name, :] = (
-            Z.loc[co_name, :] + Z.loc[agg_list, :].sum(level="sector", axis=0)
+            Z.loc[co_name, :] + Z.loc[agg_list, :].groupby(level="sector", axis=0).sum()
         ).values
         Z = Z.drop(agg_list, axis=0)
         Y.loc[co_name, :] = (
-            Y.loc[co_name, :] + Y.loc[agg_list, :].sum(level="sector", axis=0)
+            Y.loc[co_name, :] + Y.loc[agg_list, :].groupby(level="sector", axis=0).sum()
         ).values
         Y = Y.drop(agg_list, axis=0)
 
         # aggregate columns
         Z.loc[:, co_name] = (
-            Z.loc[:, co_name] + Z.loc[:, agg_list].sum(level="sector", axis=1)
+            Z.loc[:, co_name] + Z.loc[:, agg_list].groupby(level="sector", axis=1).sum()
         ).values
         Z = Z.drop(agg_list, axis=1)
 
         F_factor_input.loc[:, co_name] = (
             F_factor_input.loc[:, co_name]
-            + F_factor_input.loc[:, agg_list].sum(level="sector", axis=1)
+            + F_factor_input.loc[:, agg_list].groupby(level="sector", axis=1).sum()
         ).values
         F_factor_input = F_factor_input.drop(agg_list, axis=1)
 
@@ -1698,8 +1710,6 @@ def parse_oecd(path, year=None):
             "F_Y": F_Y_factor_input,
         },
     )
-
-    # TODO: aggregation of China and Mexico
 
     return oecd
 
@@ -1853,11 +1863,30 @@ def parse_eora26(path, year=None, price="bp", country_names="eora"):
 
     if is_zip:
         zip_file = zipfile.ZipFile(eora_loc)
+        indices_file = None
+        for key, filename in eora_files.items():
+            if filename not in zip_file.namelist() and filename.startswith("labels"):
+                try:
+                    indices_loc = os.path.join(path, "indices.zip")
+                    indices_file = zipfile.ZipFile(indices_loc)
+                except:
+                    raise ValueError(
+                        f"{filename} is not available in the zip file and no indices.zip file is available in the directory provided"
+                    )
+
         eora_data = {
-            key: pd.read_csv(
-                zip_file.open(filename),
-                sep=eora_sep,
-                header=None,
+            key: (
+                pd.read_csv(
+                    zip_file.open(filename),
+                    sep=eora_sep,
+                    header=None,
+                )
+                if filename in zip_file.namelist()
+                else pd.read_csv(
+                    indices_file.open(filename),
+                    sep=eora_sep,
+                    header=None,
+                )
             )
             for key, filename in eora_files.items()
         }
@@ -1891,7 +1920,7 @@ def parse_eora26(path, year=None, price="bp", country_names="eora"):
     Q_unit = pd.DataFrame(labQ["stressor"].str.extract(r"\((.*)\)", expand=False))
     Q_unit.columns = IDX_NAMES["unit"]
 
-    labQ["stressor"] = labQ["stressor"].str.replace(r"\s\((.*)\)", "")
+    labQ["stressor"] = labQ["stressor"].str.replace(r"\s\((.*)\)", "", regex=True)
     eora_data["labels_Q"] = labQ
 
     for key in eora_header_spec.keys():

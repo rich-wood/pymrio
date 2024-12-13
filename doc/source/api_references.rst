@@ -125,6 +125,7 @@ directly on the Extensions.
    IOSystem.get_Y_categories
    IOSystem.get_index
    IOSystem.set_index
+   IOSystem.get_gross_trade
    Extension.get_rows
 
 
@@ -160,10 +161,13 @@ numpy array.
    calc_x
    calc_Z
    calc_A
+   calc_As
    calc_L
+   calc_G
    calc_S
    calc_F
    calc_M
+   calc_M_down
    calc_e
    calc_accounts
 
@@ -229,8 +233,8 @@ Changing extensions
    concate_extension
    parse_exio12_ext
 
-Renaming
-========
+Adjusting and Renaming
+=======================
 
 .. autosummary::
    :toctree: api_doc/
@@ -238,6 +242,15 @@ Renaming
    IOSystem.rename_regions
    IOSystem.rename_sectors
    IOSystem.rename_Y_categories
+
+Getting predefined Classifications of MRIOs
+=============================================
+
+.. autosummary::
+   :toctree: api_doc/
+
+   get_classification
+   ClassificationData
 
 ******
 Report

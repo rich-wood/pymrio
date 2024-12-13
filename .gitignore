@@ -20,6 +20,7 @@ Session.vim
 #
 .~lock.*
 .tags
+.pyc
 Session.vim
 /.cache/
 /dist/
@@ -31,7 +32,7 @@ Session.vim
 /.idea
 /**/.ipynb_checkpoints/
 tags
-
+.vscode/
 # Coverage stuff
 .coverage
 /htmlcov

@@ -4,11 +4,13 @@ All methods here should follow the functional programming paradigm
 
 Note
 ----
-To avoid namespace pollution everythin here starts with calc_
+To avoid namespace pollution everything here starts with calc_
 
 """
 
+import typing
 import warnings
+from collections import namedtuple
 
 import numpy as np
 import pandas as pd
@@ -150,6 +152,50 @@ def calc_A(Z, x):
         return Z * recix
 
 
+def calc_As(Z, x):
+    """Calculate the As matrix (coefficients) from Z and x
+
+    As is a normalized version of the industrial flows of the transpose of Z, which quantifies the input to downstream
+    sectors.
+
+    Parameters
+    ----------
+    Z : pandas.DataFrame or numpy.array
+        Symmetric input output table (flows)
+    x : pandas.DataFrame or numpy.array
+        Industry output column vector
+
+    Returns
+    -------
+    pandas.DataFrame or numpy.array
+        Symmetric input output table (coefficients) As
+        The type is determined by the type of Z.
+        If DataFrame index/columns as Z
+
+    """
+    if (type(x) is pd.DataFrame) or (type(x) is pd.Series):
+        x = x.values
+    if (type(x) is not np.ndarray) and (x == 0):
+        recix = 0
+    else:
+        with warnings.catch_warnings():
+            # catch the divide by zero warning
+            # we deal wit that by setting to 0 afterwards
+            warnings.simplefilter("ignore")
+            recix = 1 / x
+        recix[recix == np.inf] = 0
+        recix = recix.reshape((1, -1))
+    # use numpy broadcasting - factor ten faster
+    # Mathematical form - slow
+    # return Z.dot(np.diagflat(recix))
+    if type(Z) is pd.DataFrame:
+        return pd.DataFrame(
+            np.transpose(Z.values) * recix, index=Z.index, columns=Z.columns
+        )
+    else:
+        return np.transpose(Z) * recix
+
+
 def calc_L(A):
     """Calculate the Leontief L from A
 
@@ -186,6 +232,65 @@ def calc_L(A):
         return np.linalg.inv(I - A)
 
 
+def calc_G(As, L=None, x=None):
+    """Calculate the Ghosh inverse matrix G either from As (high computation effor) or from Leontief matrix L and x
+    (low computation effort)
+
+    G = inverse matrix of (I - As) = hat(x)^{-1} *  L^T * hat(x)
+
+    where I is an identity matrix of same shape as As, and hat(x) is the diagonal matrix with values of x on the
+    diagonal.
+
+    Note that we define G as the transpose of the Ghosh inverse matrix, so that we can apply the factors of
+    production intensities from the left-hand-side for both Leontief and Ghosh attribution. In this way the
+    multipliers have the same (vector) dimensions and can be added.
+
+    Parameters
+    ----------
+    As : pandas.DataFrame or numpy.array
+        Symmetric input output table (coefficients)
+
+    Returns
+    -------
+    pandas.DataFrame or numpy.array
+        Ghosh input output table G
+        The type is determined by the type of As.
+        If DataFrame index/columns as As
+
+    """
+    # if L has already been calculated, then G can be derived from it with low computational cost.
+    if L is not None and x is not None:
+        if (type(x) is pd.DataFrame) or (type(x) is pd.Series):
+            x = x.values
+        if (type(x) is not np.ndarray) and (x == 0):
+            recix = 0
+        else:
+            with warnings.catch_warnings():
+                # catch the divide by zero warning
+                # we deal wit that by setting to 0 afterwards
+                warnings.simplefilter("ignore")
+                recix = 1 / x
+            recix[recix == np.inf] = 0
+            recix = recix.reshape((1, -1))
+
+        if type(L) is pd.DataFrame:
+            return pd.DataFrame(
+                recix * np.transpose(L.values * x), index=Z.index, columns=Z.columns
+            )
+        else:
+            # G = hat(x)^{-1} *  L^T * hat(x) in mathematical form np.linalg.inv(hatx).dot(L.transpose()).dot(hatx).
+            # it is computationally much faster to multiply element-wise because hatx is a diagonal matrix.
+            return recix * np.transpose(L * x)
+    else:  # calculation of the inverse of I-As has a high computational cost.
+        I = np.eye(As.shape[0])  # noqa
+        if type(As) is pd.DataFrame:
+            return pd.DataFrame(
+                np.linalg.inv(I - As), index=As.index, columns=As.columns
+            )
+        else:
+            return np.linalg.inv(I - As)  # G = inverse matrix of (I - As)
+
+
 def calc_S(F, x):
     """Calculate extensions/factor inputs coefficients
 
@@ -210,6 +315,13 @@ def calc_S(F, x):
 def calc_S_Y(F_Y, y):
     """Calculate extensions/factor inputs coefficients for the final demand
 
+    Note
+    ----
+    F_Y will be restricted to the item available in y for the calculation. This
+    allows to use a subset of Y (just some regions for example) to be used for
+    the calculations. Only works when using pandas DataFrames/Series.
+
+
     Parameters
     ----------
     F_Y : pandas.DataFrame or numpy.array
@@ -225,7 +337,11 @@ def calc_S_Y(F_Y, y):
         If DataFrame index/columns as F
 
     """
-    return calc_A(F_Y, y)
+    if type(F_Y) is pd.DataFrame and type(y) is (pd.Series or pd.DataFrame):
+        F_Y_calc = F_Y.loc[:, y.index]
+    else:
+        F_Y_calc = F_Y
+    return calc_A(F_Y_calc, y)
 
 
 def calc_F(S, x):
@@ -252,6 +368,12 @@ def calc_F(S, x):
 def calc_F_Y(S_Y, y):
     """Calc. total direct impacts from the impact coefficients of final demand
 
+    Note
+    ----
+    S_Y will be restricted to the item available in y for the calculation. This
+    allows to use a subset of Y (just some regions for example) to be used for
+    the calculations. Only works when using pandas DataFrames/Series.
+
     Parameters
     ----------
     S_Y : pandas.DataFrame or numpy.array
@@ -267,7 +389,12 @@ def calc_F_Y(S_Y, y):
         If DataFrame index/columns as S_Y
 
     """
-    return calc_Z(S_Y, y)
+    if type(S_Y) is pd.DataFrame and type(y) is (pd.Series or pd.DataFrame):
+        S_Y_calc = S_Y.loc[:, y.index]
+    else:
+        S_Y_calc = S_Y
+
+    return calc_Z(S_Y_calc, y)
 
 
 def calc_M(S, L):
@@ -284,11 +411,36 @@ def calc_M(S, L):
     -------
     pandas.DataFrame or numpy.array
         Multipliers M
-        The type is determined by the type of D.
-        If DataFrame index/columns as D
+        The type is determined by the type of S.
+        If DataFrame index/columns as S
 
     """
     return S.dot(L)
+
+
+def calc_M_down(S, G):
+    """Calculate downstream multipliers of the extensions
+
+    M_down = S * ( G - I )
+
+    Where I is an identity matrix of same shape as G
+
+    Parameters
+    ----------
+    G : pandas.DataFrame or numpy.array
+        Ghosh input output table G
+    S : pandas.DataFrame or numpy.array
+        Direct impact coefficients
+
+    Returns
+    -------
+    pandas.DataFrame or numpy.array
+        Downstream multipliers M
+        The type is determined by the type of S.
+        If DataFrame index/columns as S
+
+    """
+    return S.dot(G - np.eye(G.shape[0]))
 
 
 def calc_e(M, Y):
@@ -309,12 +461,14 @@ def calc_e(M, Y):
         Multipliers m
         The type is determined by the type of M.
         If DataFrame index/columns as M
-    The calcubased on multipliers M and finald demand Y"""
+        The calculation is based on multipliers M and final demand Y
+
+    """
 
     return M.dot(Y)
 
 
-def recalc_M(S, D_cba, Y, nr_sectors):
+def recalc_M(S, D_cba, Y):
     """Calculate Multipliers based on footprints.
 
     Parameters
@@ -325,8 +479,6 @@ def recalc_M(S, D_cba, Y, nr_sectors):
         Final demand: aggregated across categories or just one category, one
         column per country. This will be diagonalized per country block.
         The diagonolized form must be invertable for this method to work.
-    nr_sectors : int
-        Number of sectors in the MRIO
 
     Returns
     -------
@@ -335,11 +487,9 @@ def recalc_M(S, D_cba, Y, nr_sectors):
         Multipliers M
         The type is determined by the type of D_cba.
         If DataFrame index/columns as D_cba
-
-
     """
 
-    Y_diag = ioutil.diagonalize_blocks(Y.values, blocksize=nr_sectors)
+    Y_diag = ioutil.diagonalize_columns_to_sectors(Y)
     Y_inv = np.linalg.inv(Y_diag)
     M = D_cba.dot(Y_inv)
     if type(D_cba) is pd.DataFrame:
@@ -349,7 +499,7 @@ def recalc_M(S, D_cba, Y, nr_sectors):
     return M
 
 
-def calc_accounts(S, L, Y, nr_sectors):
+def calc_accounts(S, L, Y):
     """Calculate sector specific cba and pba based accounts, imp and exp accounts
 
     The total industry output x for the calculation
@@ -363,10 +513,7 @@ def calc_accounts(S, L, Y, nr_sectors):
         Direct impact coefficients
     Y : pandas.DataFrame
         Final demand: aggregated across categories or just one category, one
-        column per country
-    nr_sectors : int
-        Number of sectors in the MRIO
-
+        column per country. Shape: rows as L, Y with just region names
 
     Returns
     -------
@@ -385,24 +532,33 @@ def calc_accounts(S, L, Y, nr_sectors):
     # diagonalize each sector block per country
     # this results in a disaggregated y with final demand per country per
     # sector in one column
-    Y_diag = ioutil.diagonalize_blocks(Y.values, blocksize=nr_sectors)
-    x_diag = L.dot(Y_diag)
+
+    if isinstance(Y.columns, pd.MultiIndex):
+        raise ValueError(
+            "Column index of Y can not be a MultiIndex - aggregate the columns"
+        )
+    Y_diag = ioutil.diagonalize_columns_to_sectors(Y)
+    x_diag = L @ Y_diag
+
     x_tot = x_diag.values.sum(1)
+
     del Y_diag
 
-    D_cba = pd.DataFrame(S.values.dot(x_diag), index=S.index, columns=S.columns)
+    D_cba = pd.DataFrame(S @ x_diag)
+
     # D_pba = S.dot(np.diagflat(x_tot))
     # faster broadcasted calculation:
+    # NB: D_pba columns might be different to D_cba columns if Y include "regions" which are not in the core. This happens for example for statistical discrepancy in the OECD tables. It is "theoretically" possible to calculate footprints for these "regions", but not PBA accounts.
     D_pba = pd.DataFrame(
         S.values * x_tot.reshape((1, -1)), index=S.index, columns=S.columns
     )
 
     # for the traded accounts set the domestic industry output to zero
-    dom_block = np.zeros((nr_sectors, nr_sectors))
-    x_trade = ioutil.set_block(x_diag.values, dom_block)
-    D_imp = pd.DataFrame(S.values.dot(x_trade), index=S.index, columns=S.columns)
+    x_trade = ioutil.set_dom_block(x_diag, value=0)
+    D_imp = pd.DataFrame(S @ x_trade)
 
-    x_exp = x_trade.sum(1)
+    x_exp = x_trade.sum(1).values
+
     # D_exp = S.dot(np.diagflat(x_exp))
     # faster broadcasted version:
     D_exp = pd.DataFrame(
@@ -410,3 +566,67 @@ def calc_accounts(S, L, Y, nr_sectors):
     )
 
     return (D_cba, D_pba, D_imp, D_exp)
+
+
+def calc_gross_trade(
+    Z: pd.DataFrame, Y: pd.DataFrame
+) -> typing.NamedTuple(
+    "gross_trade", [("bilat_flows", pd.DataFrame), ("totals", pd.DataFrame)]
+):
+    """Calculate the gross bilateral trade flows and totals
+
+    These are the entries of Z and Y with the domestic blocks set to 0.
+
+    Notes
+    ----------
+    This only works for DataFrame representation of Z and Y following the
+    standard pymrio structure (regions on Multiindex level 0 or named 'region',
+    sectors/categories on Multiindex level 1 or named 'sector').
+
+    Parameters
+    ----------
+    Z : pandas.DataFrame
+        Symmetric input output table (flows)
+    Y : pandas.DataFrame
+        final demand with regions (multiindex level 1) and categories (level 2)
+
+    Returns
+    -------
+    namedtuple (with two DataFrames)
+        A NamedTuple with two fields:
+
+            - bilat_flows: df with rows: exporting country and sector,
+              columns: importing countries
+            - totals: df with gross total imports and exports per sector
+              and region
+
+    """
+
+    Z_trade_blocks = ioutil.set_dom_block(Z, value=0)
+    Y_trade_blocks = ioutil.set_dom_block(Y, value=0)
+
+    level_spec_Z = "region" if "region" in Z.columns.names else 0
+    level_spec_Y = "region" if "region" in Y.columns.names else 0
+    Z_trade_agg = Z_trade_blocks.groupby(axis=1, level=level_spec_Z, sort=False).agg(
+        sum
+    )
+    Y_trade_agg = Y_trade_blocks.groupby(axis=1, level=level_spec_Y, sort=False).agg(
+        sum
+    )
+
+    x_bilat = Z_trade_agg + Y_trade_agg
+
+    level_spec_x = "sector" if "sector" in x_bilat.index.names else 1
+    gross_imports = pd.DataFrame(
+        x_bilat.groupby(axis=0, level=level_spec_x, sort=False)
+        .agg(sum)
+        .stack()
+        .swaplevel(),
+        columns=["imports"],
+    )
+    gross_exports = pd.DataFrame(x_bilat.sum(axis=1), columns=["exports"])
+
+    # gross_exports first as the swaplevel in gross_imports rearanges sectors!
+    gross_totals = gross_exports.join(gross_imports)
+
+    return namedtuple("gross_trade", "bilat_flows totals")(x_bilat, gross_totals)

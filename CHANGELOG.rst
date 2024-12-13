@@ -2,12 +2,120 @@
 Changelog
 #########
 
+***************************
+v0.5.4 - 20240412
+***************************
+
+New features
+============
+
+* added functionality to download and parse 2023 release of OECD IO tables (by @jaimeoliver1, #132)
+
+* Added draft Gosh implementation for downstream analysis (by @Beckebanze , #136)
+
+    - equivalent of A for Ghosh (A* in literature, called As in pymrio)
+    - the Ghosh inverse (often referred to G in literature). 
+    - downstream scope 3 multiplier, M_{down}, such the sum of the M+M_{down} is the full scope multiplier, with M the existing multiplier in pymrio that covers scope 1,2&3 upstream.
+    - a short addition to the pymrio background page that introduces the Ghosh model
+    - tests that test the functionality of the added functions
 
 ***************************
-v0.4.6dev
+v0.5.3 - 20231023
 ***************************
 
+Bugfixes
+========
+
+* Fix downloader for new Zenodo API (by @hazimhussein)
+* Fix coverage report (by @konstantinstadler)
+
+***************************
+v0.5.2 - 20230815
+***************************
+
+New features
+============
+
+* OECD bundle download (by @hazimhussein) - see https://pymrio.readthedocs.io/en/latest/notebooks/autodownload.html#OECD-download
+* Fix EORA26 parsing (by @hazimhussein)
+
+Development
+===========
+
+* Switched to Micromamba in the CI 
+* Fixed readthedocs settings
+
+
+***************************
+v0.5.1 - 20230615
+***************************
+
+* small bugfix with version numbering
+
+***************************
+v0.5.0 - 20230615
+***************************
+
+Development
+===========
+
+* Move the repository to the public IndEcol organization on GitHub: https://github.com/IndEcol/pymrio
+
+Breaking changes
+================
+
+* dropped support for Python 3.7 and added 3.10 and 3.11
+* License changed to LESSER GNU GENERAL PUBLIC LICENSE v3 (LGPLv3)
+* added pyarrow as requirment
+
+New features
+============
+
+* Autodownloader for GLORIA MRIO (by @hazimhussein)
+* Support of parquet format for load and save function 
+
+
+Bugfixes
+============
+
+* Fix Eora downloader (by @hazimhussein)
+
+***************************
+v0.4.8 - 20221116
+***************************
+
+* Added inbuild classification for 
+  - Test MRIO
+  - EXIOBASE 2 
+  - EXIOBASE 3
+
+* Method for renaming sectors/regions based on the built in classification
+* Method for aggregating duplicated indexes
+
+Bugfixes
+========
+
+* F_Y was removed in reset_full - fixed
+* updated deprecated pandas methods - fix #93
+
+***************************
+v0.4.7 - 20220428
+***************************
+
+* Fixed OECD downloader and parser (by @jaimeoliver1)
+
+***************************
+v0.4.6 - 20211118
+***************************
+
+* Fixed indexing bug in calc_accounts for non-full Y 
 * Added Stadler 2021 reference
+* change github actions testing to development -> production for multiple os
+
+Breaking changes
+================
+
+* dropped support for Python 3.6
 
 ***************************
 v0.4.5 (March 03, 2021) 

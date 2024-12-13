@@ -66,6 +66,33 @@ def test_copy(fix_testmrio):
     assert e_new.name == "new"
 
 
+def test_get_gross_trade(fix_testmrio):
+    tt = fix_testmrio.testmrio
+    gross_trade = tt.get_gross_trade()
+    flows = gross_trade.bilat_flows
+    totals = gross_trade.totals
+
+    reg2mining_exports = (
+        tt.Z.loc[("reg2", "mining"), :].sum()
+        - tt.Z.loc[("reg2", "mining"), "reg2"].sum()
+        + tt.Y.loc[("reg2", "mining"), :].sum()
+        - tt.Y.loc[("reg2", "mining"), "reg2"].sum()
+    )
+
+    assert reg2mining_exports == pytest.approx(totals.exports.loc["reg2", "mining"])
+
+    for reg in tt.get_regions():
+        assert flows.loc[reg, reg].sum().sum() == 0
+
+    reg3trade_imports_from_reg2 = (
+        tt.Z.loc[("reg2", "trade"), "reg3"].sum()
+        + tt.Y.loc[("reg2", "trade"), "reg3"].sum()
+    )
+    assert reg3trade_imports_from_reg2 == pytest.approx(
+        flows.loc[("reg2", "trade"), "reg3"]
+    )
+
+
 def test_get_index(fix_testmrio):
     """Testing the different options for get_index in core.mriosystem"""
     tt = fix_testmrio.testmrio
@@ -161,7 +188,7 @@ def test_rename_regions(fix_testmrio):
     assert fix_testmrio.testmrio.get_regions()[2] == new_reg_list[2]
 
 
-def test_rename_sectors(fix_testmrio):
+def test_rename_random_sectors(fix_testmrio):
     new_sec_name = "yummy"
     new_sec_list = ["s1", "s2", "s3", "s4", "s5", "s6"]
     fix_testmrio.testmrio.rename_sectors({"food": new_sec_name})
@@ -169,6 +196,26 @@ def test_rename_sectors(fix_testmrio):
     fix_testmrio.testmrio.rename_sectors(new_sec_list)
     assert fix_testmrio.testmrio.get_sectors()[0] == new_sec_list[0]
     assert fix_testmrio.testmrio.get_sectors()[4] == new_sec_list[4]
+
+
+def test_rename_sector_with_io_info(fix_testmrio):
+    with pytest.raises(ValueError):
+        _ = pymrio.get_classification("foo")
+
+    classdata = pymrio.get_classification("test")
+    corr_dict = classdata.get_sector_dict(orig="TestMrioName", new="TestMrioCode")
+    corr_dict2 = classdata.get_sector_dict(
+        orig=fix_testmrio.testmrio.get_sectors(), new="TestMrioCode"
+    )
+
+    assert corr_dict == corr_dict2
+
+    fix_testmrio.testmrio.rename_sectors(corr_dict)
+
+    assert (
+        fix_testmrio.testmrio.get_sectors()[3]
+        == classdata.sectors.iloc[3, :].loc["TestMrioCode"]
+    )
 
 
 def test_rename_Ycat(fix_testmrio):
@@ -193,8 +240,8 @@ def test_copy_and_extensions(fix_testmrio):
 def test_get_row_data(fix_testmrio):
     stressor = ("emission_type1", "air")
     tt = fix_testmrio.testmrio.copy().calc_all()
-    td = tt.emissions.get_row_data(stressor)["D_cba_reg"]
-    md = pd.DataFrame(tt.emissions.D_cba_reg.loc[stressor])
+    td = tt.emissions.get_row_data(stressor)["D_exp_reg"]
+    md = pd.DataFrame(tt.emissions.D_exp_reg.loc[stressor])
     pdt.assert_frame_equal(td, md)
 
     for df_name in tt.emissions.get_DataFrame():
@@ -244,10 +291,10 @@ def test_characterize_extension(fix_testmrio):
         (t_calc.emissions.D_imp.loc[("emission_type1", "air"), :] / 1000).sum(),
     )
     npt.assert_allclose(
-        ex_calc.D_cba.loc["air water impact"].sum(),
+        ex_calc.D_exp.loc["air water impact"].sum(),
         (
-            (t_calc.emissions.D_cba.loc[("emission_type1", "air"), :] * 2 / 1000)
-            + (t_calc.emissions.D_cba.loc[("emission_type2", "water"), :] * 1 / 1000)
+            (t_calc.emissions.D_exp.loc[("emission_type1", "air"), :] * 2 / 1000)
+            + (t_calc.emissions.D_exp.loc[("emission_type2", "water"), :] * 1 / 1000)
         ).sum(),
     )
 
@@ -295,8 +342,6 @@ def test_characterize_extension(fix_testmrio):
         t_calc.emissions.S.loc[("emission_type1", "air"), :] / 1000,
         check_names=False,
     )
-
-    return locals()
 
 
 def test_reset_to_flows(fix_testmrio):
@@ -347,7 +392,7 @@ def test_reset_all_full(fix_testmrio):
     tt.reset_all_full()
     assert tt.A is None
     assert tt.emissions.S is None
-    assert tt.emissions.D_cba is None
+    assert tt.emissions.D_exp is None
     tt.Z = None
     with pytest.raises(pymrio.core.mriosystem.ResetError):
         tt.reset_all_full()
@@ -361,3 +406,64 @@ def test_reset_to_coefficients(fix_testmrio):
     tt.reset_all_to_coefficients()
     assert tt.Z is None
     assert tt.emissions.F is None
+
+
+def test_direct_account_calc(fix_testmrio):
+    orig = fix_testmrio.testmrio
+    orig.calc_all()
+
+    with pytest.raises(ValueError):
+        (D_cba, D_pba, D_imp, D_exp) = pymrio.calc_accounts(
+            orig.emissions.S, orig.L, orig.Y
+        )
+
+    new = orig.copy().rename_regions({"reg3": "ll", "reg4": "aa"})
+
+    Y_agg = new.Y.groupby(axis=1, level="region", sort=False).agg(sum)
+
+    (D_cba, D_pba, D_imp, D_exp) = pymrio.calc_accounts(new.emissions.S, new.L, Y_agg)
+
+    pdt.assert_frame_equal(orig.emissions.D_cba["reg2"], D_cba["reg2"])
+    pdt.assert_frame_equal(orig.emissions.D_exp["reg4"], D_exp["aa"])
+    pdt.assert_frame_equal(orig.emissions.D_imp["reg3"], D_imp["ll"])
+
+
+def test_extension_reset_with_rename(fix_testmrio):
+    orig = fix_testmrio.testmrio
+    orig.calc_all()
+
+    new = orig.copy()
+    new.reset_extensions()
+    new.Y = new.Y.loc[:, ["reg2", "reg3"]]
+    new.calc_all()
+
+    pdt.assert_frame_equal(new.A, orig.A)
+
+    pdt.assert_frame_equal(new.emissions.D_cba["reg2"], orig.emissions.D_cba["reg2"])
+    pdt.assert_frame_equal(new.emissions.D_imp["reg2"], orig.emissions.D_imp["reg2"])
+
+    assert orig.emissions.D_exp_reg.reg1.sum() > new.emissions.D_exp_reg.reg1.sum()
+
+    orig_rename = orig.copy()
+    orig_rename.reset_extensions()
+    orig_rename.rename_regions({"reg3": "cd", "reg4": "ab"})
+
+    orig_rename.calc_all()
+    pdt.assert_frame_equal(
+        orig.emissions.D_imp["reg3"], orig_rename.emissions.D_imp["cd"]
+    )
+    new_rename = orig_rename.copy().reset_extensions()
+    new_rename.Y = new_rename.Y.loc[:, ["reg2", "cd", "ab"]]
+    new_rename.calc_all()
+    pdt.assert_frame_equal(
+        new_rename.emissions.D_imp["reg2"], orig_rename.emissions.D_imp["reg2"]
+    )
+    pdt.assert_frame_equal(
+        new_rename.emissions.D_cba["cd"], orig_rename.emissions.D_cba["cd"]
+    )
+    pdt.assert_frame_equal(
+        new_rename.emissions.D_cba["ab"], orig_rename.emissions.D_cba["ab"]
+    )
+    pdt.assert_frame_equal(
+        orig.emissions.D_cba["reg4"], new_rename.emissions.D_cba["ab"]
+    )

@@ -3,14 +3,21 @@ Utility function for pymrio
 
 KST 20140502
 """
+
 import json
 import logging
 import os
+import re
+import ssl
 import zipfile
 from collections import namedtuple
 from pathlib import Path
+from typing import Union
 
 import numpy as np
+import pandas as pd
+import requests
+import urllib3
 
 from pymrio.core.constants import DEFAULT_FILE_NAMES, PYMRIO_PATH
 
@@ -237,7 +244,56 @@ def build_agg_matrix(agg_vector, pos_dict=None):
     return agg_matrix
 
 
-def diagonalize_blocks(arr, blocksize):
+def diagonalize_columns_to_sectors(
+    df: pd.DataFrame, sector_index_level: Union[str, int] = "sector"
+) -> pd.DataFrame:
+    """Adds the resolution of the rows to columns by diagonalizing
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        The DataFrame to diagonalize
+    sector_index_name : string, optional
+        Name or number of the index level containing sectors.
+
+    Returns
+    -------
+    pd.DataFrame, diagonalized
+
+
+    Example
+    --------
+        input       output
+         (all letters are index or header)
+            A B     A A A B B B
+                    x y z x y z
+        A x 3 1     3 0 0 1 0 0
+        A y 4 2     0 4 0 0 2 0
+        A z 5 3     0 0 5 0 0 3
+        B x 6 9     6 0 0 9 0 0
+        B y 7 6     0 7 0 0 6 0
+        B z 8 4     0 0 8 0 0 4
+
+    """
+
+    sectors = df.index.get_level_values(sector_index_level).unique()
+    sector_name = sector_index_level if type(sector_index_level) is str else "sector"
+
+    new_col_index = [
+        tuple(list(orig) + [new]) for orig in df.columns for new in sectors
+    ]
+
+    diag_df = pd.DataFrame(
+        data=diagonalize_blocks(df.values, blocksize=len(sectors)),
+        index=df.index,
+        columns=pd.MultiIndex.from_product(
+            [df.columns, sectors], names=[*df.columns.names, sector_name]
+        ),
+    )
+    return diag_df
+
+
+def diagonalize_blocks(arr: np.array, blocksize: int):
     """Diagonalize sections of columns of an array for the whole array
 
     Parameters
@@ -289,6 +345,29 @@ def diagonalize_blocks(arr, blocksize):
     return arr_diag
 
 
+def set_dom_block(df: pd.DataFrame, value: float = 0) -> pd.DataFrame:
+    """Set domestic blocks to value (0 by default)
+
+    Requires that the region is the top index in the multiindex
+    hierarchy (default case in pymrio).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+    value : float, optional
+
+    Returns
+    -------
+    pd.DataFrame
+
+    """
+    regions = df.index.get_level_values(0).unique()
+    df_res = df.copy()
+    for reg in regions:
+        df_res.loc[reg, reg] = 0
+    return df_res
+
+
 def set_block(arr, arr_block):
     """Sets the diagonal blocks of an array to an given array
 
@@ -334,7 +413,7 @@ def set_block(arr, arr_block):
 
 
 def unique_element(ll):
-    """ returns unique elements from a list preserving the original order """
+    """returns unique elements from a list preserving the original order"""
     seen = {}
     result = []
     for item in ll:
@@ -414,6 +493,7 @@ def build_agg_vec(agg_vec, **source):
     """
 
     # build a dict with aggregation vectors in source and folder
+    # TODO: the logic here should be moved to constants
     if type(agg_vec) is str:
         agg_vec = [agg_vec]
     agg_dict = dict()
@@ -461,7 +541,7 @@ def build_agg_vec(agg_vec, **source):
 
 
 def find_first_number(ll):
-    """ Returns nr of first entry parseable to float in ll, None otherwise"""
+    """Returns nr of first entry parseable to float in ll, None otherwise"""
     for nr, entry in enumerate(ll):
         try:
             float(entry)
@@ -561,3 +641,68 @@ def sniff_csv_format(
                     break
 
     return dict(sep=sep, nr_header_row=nr_header_row, nr_index_col=nr_index_col)
+
+
+def filename_from_url(url):
+    """
+    Extract a file name from the download link for that file
+
+    Parameters
+    ----------
+
+    url: str,
+        The download link of the file
+
+    Returns
+    -------
+    str,
+        The extracted file name
+
+    """
+    name = re.search("[^/\\&\?]+\.\w{2,7}(?=([\?&].*$|$))", url)
+    return name.group()
+
+
+def ssl_fix(*args, **kwargs):
+    """
+    Tries to use a request connection with Lagacy option
+    when normal connection fails
+
+    Parameters
+    ----------
+    Parameters of a normal requests.get() function
+        url: URL for the new :class:`Request` object.
+        params: (optional) Dictionary, list of tuples or bytes to send
+        in the query string for the class `Request`.
+        **kwargs: Optional arguments that `request` takes.
+
+    Returns
+    -------
+        r: class:`Response <Response>` object
+    """
+
+    class CustomHttpAdapter(requests.adapters.HTTPAdapter):
+        # "Transport adapter" that allows us to use custom ssl_context.
+
+        def __init__(self, ssl_context=None, **kwargs):
+            self.ssl_context = ssl_context
+            super().__init__(**kwargs)
+
+        def init_poolmanager(self, connections, maxsize, block=False):
+            self.poolmanager = urllib3.poolmanager.PoolManager(
+                num_pools=connections,
+                maxsize=maxsize,
+                block=block,
+                ssl_context=self.ssl_context,
+            )
+
+    try:
+        r = requests.get(*args, **kwargs)
+    except:
+        ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        ctx.options |= 0x4  # OP_LEGACY_SERVER_CONNECT
+        session = requests.session()
+        session.mount("https://", CustomHttpAdapter(ctx))
+        r = session.get(*args, **kwargs)
+
+    return r
